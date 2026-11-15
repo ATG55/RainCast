@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monthly Precipitation Forecast</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1b1f24;--muted:#667085;--line:#e4e7ec;--accent:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1318;--card:#171c23;--text:#e8ecf1;--muted:#98a2b3;--line:#28303a;--accent:#60a5fa}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}
+header{padding:28px 20px 8px;max-width:1100px;margin:0 auto}
+h1{margin:0 0 4px;font-size:1.6rem}
+header p{margin:0;color:var(--muted)}
+main{max-width:1100px;margin:0 auto;padding:16px 20px 40px;display:grid;gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button.tab{border:1px solid var(--line);background:transparent;color:var(--text);padding:8px 16px;border-radius:999px;cursor:pointer;font-size:.95rem}
+button.tab.on{background:var(--accent);border-color:var(--accent);color:#fff}
+label.chk{display:flex;gap:6px;align-items:center;font-size:.9rem;cursor:pointer}
+.chartbox{position:relative;height:380px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600}
+h2{margin:0 0 10px;font-size:1.05rem}
+.best{color:var(--accent);font-weight:700}
+.note{color:var(--muted);font-size:.85rem;margin-top:8px}
+#hata{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Monthly Precipitation Forecast</h1>
+  <p>Istanbul and Izmir · Machine learning forecasts, 2025–2030</p>
+</header>
+<main>
+  <div id="hata" class="card">
+    <h2>Could not load forecast.json</h2>
+    <p class="note">If you opened this page directly from a file, the browser cannot read the JSON. Run <code>python -m http.server</code> in a terminal and open <code>localhost:8000</code>, or select the file manually:</p>
+    <input type="file" id="dosya" accept=".json">
+  </div>
+
+  <div class="card">
+    <div class="row" id="bolgeler"></div>
+    <div class="row" id="modeller" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card"><div class="chartbox"><canvas id="grafik"></canvas></div></div>
+
+  <div class="grid2">
+    <div class="card scroll">
+      <h2>Annual total forecast (mm)</h2>
+      <table id="yillik"></table>
+    </div>
+    <div class="card scroll">
+      <h2>Backtest RMSE (mm)</h2>
+      <table id="rmse"></table>
+      <p class="note">Trained on 2001–2018 and tested on 2019–2024. Lower RMSE is better.</p>
+    </div>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const RENKLER = {"Observed":"#94a3b8","RandomForest":"#16a34a","ExtraTrees":"#ea580c",
+                 "GradientBoosting":"#dc2626","XGBoost":"#9333ea"};
+const AD={"İstanbul":"Istanbul","İzmir":"Izmir"}; const ad=n=>AD[n]||n;
+let veri = null, bolge = null, aktif = new Set(), grafik = null;
+
+async function yukle(){
+  try{
+    const r = await fetch("forecast.json"); if(!r.ok) throw 0;
+    basla(await r.json());
+  }catch(e){ document.getElementById("hata").style.display="block"; }
+}
+document.getElementById("dosya").addEventListener("change", async e=>{
+  const f = e.target.files[0]; if(f) basla(JSON.parse(await f.text()));
+});
+
+function basla(v){
+  veri = v; document.getElementById("hata").style.display="none";
+  const anahtarlar = Object.keys(v.bolgeler);
+  bolge = anahtarlar[0];
+  const bd = document.getElementById("bolgeler"); bd.innerHTML="";
+  anahtarlar.forEach(k=>{
+    const b = document.createElement("button");
+    b.className="tab"; b.textContent=ad(v.bolgeler[k].ad); b.dataset.k=k;
+    b.onclick=()=>{bolge=k; ciz();}; bd.appendChild(b);
+  });
+  const modeller = Object.keys(v.bolgeler[bolge].tahmin);
+  aktif = new Set(modeller);
+  const md = document.getElementById("modeller"); md.innerHTML="";
+  modeller.forEach(m=>{
+    const l = document.createElement("label"); l.className="chk";
+    l.innerHTML=`<input type="checkbox" checked> <span style="color:${RENKLER[m]||'#0ea5e9'}">●</span> ${m}`;
+    l.querySelector("input").onchange=e=>{e.target.checked?aktif.add(m):aktif.delete(m); ciz();};
+    md.appendChild(l);
+  });
+  ciz();
+}
+
+function ciz(){
+  const b = veri.bolgeler[bolge];
+  document.querySelectorAll("#bolgeler .tab").forEach(t=>t.classList.toggle("on", t.dataset.k===bolge));
+
+  const gt = b.gozlem.tarih, ftarih = Object.values(b.tahmin)[0].tarih;
+  const etiket = gt.concat(ftarih);
+  const bos = n => Array(n).fill(null);
+  const setler = [{label:"Observed", data:b.gozlem.deger.concat(bos(ftarih.length)),
+    borderColor:RENKLER["Observed"], borderWidth:1, pointRadius:0, spanGaps:false}];
+  Object.entries(b.tahmin).forEach(([m,t])=>{
+    if(!aktif.has(m)) return;
+    setler.push({label:m, data:bos(gt.length).concat(t.deger),
+      borderColor:RENKLER[m]||"#0ea5e9", borderWidth:1.4, pointRadius:0});
+  });
+  if(grafik) grafik.destroy();
+  const metin = getComputedStyle(document.body).color;
+  grafik = new Chart(document.getElementById("grafik"), {
+    type:"line", data:{labels:etiket, datasets:setler},
+    options:{responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:"index", intersect:false},
+      plugins:{title:{display:true, text:ad(b.ad)+" – Monthly Precipitation (mm/month)", color:metin},
+               legend:{labels:{color:metin}}},
+      scales:{x:{ticks:{color:metin, maxTicksLimit:12}, grid:{display:false}},
+              y:{title:{display:true, text:"mm/month", color:metin}, ticks:{color:metin}, beginAtZero:true}}}
+  });
+
+  // Yıllık toplam tablosu
+  const mod = Object.keys(b.yillik), yillar = Object.keys(b.yillik[mod[0]]);
+  let h = "<tr><th>Year</th>"+mod.map(m=>`<th>${m}</th>`).join("")+"</tr>";
+  yillar.forEach(y=>{ h += `<tr><td>${y}</td>`+mod.map(m=>`<td>${b.yillik[m][y]}</td>`).join("")+"</tr>"; });
+  document.getElementById("yillik").innerHTML = h;
+
+  // RMSE tablosu
+  const sirali = Object.entries(b.rmse).sort((x,y)=>x[1]-y[1]);
+  document.getElementById("rmse").innerHTML =
+    "<tr><th>Model</th><th>RMSE</th></tr>" +
+    sirali.map(([m,v],i)=>`<tr class="${i===0?'best':''}"><td>${m}</td><td>${v}</td></tr>`).join("");
+}
+yukle();
+</script>
+</body>
+</html>
